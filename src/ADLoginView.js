@@ -1,6 +1,6 @@
 // @flow
 import React, { Component } from 'react'
-import { Dimensions, AsyncStorage, Platform } from 'react-native'
+import { Dimensions, AsyncStorage, Platform, View } from 'react-native'
 import { WebView } from 'react-native-webview'
 import CONST from './const.js'
 import ReactNativeAD from './ReactNativeAD.js'
@@ -113,7 +113,7 @@ export default class ADLoginView extends React.Component {
         renderError={() => renderError(this.refs.ADLoginView.reload)}
         startInLoadingState={false}
         injectedJavaScript={js}
-      />) : null
+      />) : <View style={{flex: 1}} />
     )
   }
 
@@ -123,20 +123,22 @@ export default class ADLoginView extends React.Component {
    *                        values is `common`.
    * @return {string} The Authority host URI.
    */
-  _getLoginUrl(tenant: string = 'common'): string {
+  _getLoginUrl(tenant: string = 'common', resource: string = null): string {
 
     let authUrl = String(this.props.authority_host || loginUrl).replace('<tenant id>', tenant)
+    let response_type = resource ? 'token' : 'code';
     let context = this.props.context || null
     let redirect = context.getConfig().redirect_uri
     let prompt = context.getConfig().prompt
     let login_hint = context.getConfig().login_hint
 
     if (context !== null) {
-      let result = `${authUrl}?response_type=code` +
+      let result = `${authUrl}?response_type=${response_type}` +
         `&client_id=${context.getConfig().client_id}` +
         (redirect ? `&redirect_url=${context.getConfig().redirect_uri}&nonce=rnad-${Date.now()}` : '') +
         (prompt ? `&prompt=${context.getConfig().prompt}` : '') +
-        (login_hint ? `&login_hint=${context.getConfig().login_hint}` : '')
+        (login_hint ? `&login_hint=${context.getConfig().login_hint}` : '') +
+        (resource ? `&resource=${resource}` : '');
 
       if (this._needRedirect)
         result = `https://login.windows.net/${this.props.context.getConfig().client_id}/oauth2/logout`
@@ -156,7 +158,9 @@ export default class ADLoginView extends React.Component {
     log.verbose('ADLoginView navigate to', e.url)
     if (this._lock)
       return true
-    let code = /((\?|\&)code\=)[^\&]+/.exec(e.url)
+    let code = /((\?|\&)code\=)[^\&]+/.exec(e.url),
+        accessToken = /(#access_token\=)[^\&]+/.exec(e.url),
+        error = /((\?|\&)error_description\=)[^\&]+/.exec(e.url);
 
     if (this._needRedirect) {
       // this._needRedirect = false
@@ -173,11 +177,39 @@ export default class ADLoginView extends React.Component {
       this.setState({ visible: !this.props.hideAfterLogin })
       this.props.onVisibilityChange && this.props.onVisibilityChange(false)
       this._getResourceAccessToken(code).catch((err) => {
-        let onError = this.props.onError || function(err) {
-          log.error('ADLoginView._getResourceAccessToken', err)
+        if (err.resource && err.response
+            && err.response.error === 'interaction_required') {
+          this._lock = false
+          let tenant = this.props.context.getConfig().tenant || 'common'
+          this.setState({
+            page: this._getLoginUrl(tenant, err.resource),
+            visible: true
+          })
+        } else {
+          let onError = this.props.onError || function(err) {
+            log.error('ADLoginView._getResourceAccessToken', err)
+          }
+          onError(err)
         }
-        onError(err);
       })
+      return true
+    } else if (accessToken) {
+      // Successfully retrieved auth token; redirect back through login flow
+      let tenant = this.props.context.getConfig().tenant || 'common'
+      this.setState({
+        page: this._getLoginUrl(tenant),
+        visible: true
+      })
+      return true
+    } else if (error && this.props.onError) {
+      this.props.onError(
+        new Error(
+          decodeURIComponent(error[0])
+            .replace(/.error_description=/, "")
+            .replace(/\+/g, " ")
+        )
+      )
+      this.setState({ visible: !this.props.hideAfterLogin })
       return true
     }
 
